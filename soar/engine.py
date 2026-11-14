@@ -33,7 +33,11 @@ PLAYBOOKS: dict[str, list[str]] = {
     "T1098": ["Verify the group change against an approved change ticket",
               "Remove the account from Administrators if unapproved"],
     "T1136": ["Verify the new account is approved", "Disable it if not"],
-    "T1071": ["Look up the queried domain\'s reputation", "Block the domain at DNS / proxy if malicious"],
+    "T1078": ["Reset the account's password and end its active sessions",
+              "Review what the account did after logging in"],
+    "T1021": ["Confirm whether the remote service (Telnet/RDP/SMB) is approved on the target",
+              "Disable cleartext services such as Telnet and use SSH instead"],
+    "T1071": ["Look up the queried domain's reputation", "Block the domain at DNS / proxy if malicious"],
 }
 DEFAULT_ACTIONS = ["Review the raw alert and the surrounding logs", "Escalate to Tier 2 if unsure"]
 
@@ -54,7 +58,7 @@ class Alert:
 # ---------------------------------------------------------------- normalise
 
 def normalise(event: dict) -> Alert | None:
-    """Turn a Wazuh or Suricata event into a common Alert, or None if it isn\'t an alert."""
+    """Turn a Wazuh or Suricata event into a common Alert, or None if it isn't an alert."""
     if "rule" in event and "level" in event.get("rule", {}):          # Wazuh
         rule = event["rule"]
         data = event.get("data", {})
@@ -88,6 +92,22 @@ def normalise(event: dict) -> Alert | None:
 
 # ---------------------------------------------------------------- enrich
 
+# Internal ranges. Everything else (including the RFC 5737 documentation ranges used in the
+# samples) is treated as public, so external-IP enrichment runs on it.
+INTERNAL_NETS = [ipaddress.ip_network(n) for n in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16",
+    "100.64.0.0/10", "::1/128", "fc00::/7", "fe80::/10")]
+
+
+def ip_type(value: str) -> str:
+    """'private' for internal ranges, 'public' otherwise, 'invalid' if not an IP."""
+    try:
+        ip = ipaddress.ip_address(value)
+    except ValueError:
+        return "invalid"
+    return "private" if any(ip.version == n.version and ip in n for n in INTERNAL_NETS) else "public"
+
+
 def load_list(path: Path) -> set[str]:
     if not path.exists():
         return set()
@@ -114,11 +134,7 @@ def enrich(alert: Alert, intel_dir: Path, lookup=abuseipdb_score) -> dict:
     info: dict = {"ip_type": None, "on_blocklist": False, "on_allowlist": False,
                   "abuse_score": None, "critical_asset": False}
     if alert.src_ip:
-        try:
-            ip = ipaddress.ip_address(alert.src_ip)
-            info["ip_type"] = "private" if ip.is_private else "public"
-        except ValueError:
-            info["ip_type"] = "invalid"
+        info["ip_type"] = ip_type(alert.src_ip)
         info["on_blocklist"] = alert.src_ip in load_list(intel_dir / "blocklist.txt")
         info["on_allowlist"] = alert.src_ip in load_list(intel_dir / "allowlist.txt")
         if info["ip_type"] == "public":
@@ -138,7 +154,7 @@ def score(alert: Alert, intel: dict, related_alerts: int = 0) -> tuple[int, str,
     if intel["on_blocklist"]:
         s += 30; reasons.append("source on blocklist (+30)")
     if (intel["abuse_score"] or 0) >= 50:
-        s += 20; reasons.append(f"AbuseIPDB score {intel[\'abuse_score\']} (+20)")
+        s += 20; reasons.append(f"AbuseIPDB score {intel['abuse_score']} (+20)")
     if intel["critical_asset"]:
         s += 15; reasons.append("target is a critical asset (+15)")
     if related_alerts:
@@ -174,7 +190,8 @@ def process_events(events: list[dict], intel_dir: Path, lookup=abuseipdb_score) 
             intel = enrich(a, intel_dir, lookup)
             s, p, reasons = score(a, intel, related_alerts=len(group) - 1)
             scored.append((s, p, reasons, a, intel))
-        scored.sort(key=lambda x: -x[0])
+        # highest score first; on a tie, the alert with the higher base severity names the case
+        scored.sort(key=lambda x: (-x[0], -x[3].base_severity))
         top_s, top_p, top_reasons, top_a, top_intel = scored[0]
         techniques = sorted({t for *_, a, _ in scored for t in a.techniques})
         case_id = "BS-" + hashlib.sha1(f"{src}{top_a.timestamp}".encode()).hexdigest()[:8].upper()
@@ -199,12 +216,12 @@ def process_events(events: list[dict], intel_dir: Path, lookup=abuseipdb_score) 
 def case_to_markdown(case: dict) -> str:
     e = case["enrichment"]
     lines = [
-        f"# {case[\'case_id\']}: {case[\'summary\']}",
+        f"# {case['case_id']}: {case['summary']}",
         "",
-        f"**Priority:** {case[\'priority\']} (score {case[\'score\']}/100)  ",
-        f"**Source IP:** {case[\'source_ip\'] or \'n/a\'} ({e[\'ip_type\'] or \'n/a\'})  ",
-        f"**ATT&CK:** {\', \'.join(case[\'techniques\']) or \'n/a\'}  ",
-        f"**Created:** {case[\'created\']}",
+        f"**Priority:** {case['priority']} (score {case['score']}/100)  ",
+        f"**Source IP:** {case['source_ip'] or 'n/a'} ({e['ip_type'] or 'n/a'})  ",
+        f"**ATT&CK:** {', '.join(case['techniques']) or 'n/a'}  ",
+        f"**Created:** {case['created']}",
         "",
         "## Why this score",
         *[f"- {r}" for r in case["score_reasons"]],
@@ -215,7 +232,7 @@ def case_to_markdown(case: dict) -> str:
         "## Related alerts",
         "| Source | Rule | Title | Host | Time |",
         "|---|---|---|---|---|",
-        *[f"| {a[\'source\']} | {a[\'rule_id\']} | {a[\'title\']} | {a[\'host\'] or \'\' } | {a[\'timestamp\']} |"
+        *[f"| {a['source']} | {a['rule_id']} | {a['title']} | {a['host'] or '' } | {a['timestamp']} |"
           for a in case["alerts"]],
         "",
     ]
@@ -226,8 +243,8 @@ def write_cases(cases: list[dict], out_dir: Path) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for c in cases:
-        md = out_dir / f"{c[\'case_id\']}.md"
+        md = out_dir / f"{c['case_id']}.md"
         md.write_text(case_to_markdown(c), encoding="utf-8")
-        (out_dir / f"{c[\'case_id\']}.json").write_text(json.dumps(c, indent=2), encoding="utf-8")
+        (out_dir / f"{c['case_id']}.json").write_text(json.dumps(c, indent=2), encoding="utf-8")
         paths.append(md)
     return paths

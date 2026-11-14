@@ -37,7 +37,7 @@ def main(argv=None) -> int:
     write_cases(cases, args.out)
     print(f"{len(cases)} case(s) written to {args.out}/")
     for c in cases:
-        print(f"  {c[\'priority\']}  {c[\'score\']:>3}  {c[\'case_id\']}  {c[\'source_ip\'] or \'-\':<15} {c[\'summary\']}")
+        print(f"  {c['priority']}  {c['score']:>3}  {c['case_id']}  {c['source_ip'] or '-':<15} {c['summary']}")
     return 0
 
 
