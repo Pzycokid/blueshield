@@ -1,1 +1,35 @@
-
+title: PowerShell Download Cradle In Script Block
+id: e1f47b62-8a3d-4c09-9f15-3b6d2c8a7e50
+status: experimental
+description: |
+    Detects PowerShell script blocks (Event ID 4104) that download content and execute it in
+    memory, for example IEX (New-Object Net.WebClient).DownloadString(...).
+references:
+    - https://attack.mitre.org/techniques/T1059/001/
+author: Likhith H S
+date: 2026-10-24
+tags:
+    - attack.execution
+    - attack.t1059.001
+    - attack.command-and-control
+    - attack.t1105
+logsource:
+    product: windows
+    category: ps_script
+    definition: 'Requires Script Block Logging to be enabled'
+detection:
+    selection_download:
+        ScriptBlockText|contains:
+            - 'Net.WebClient'
+            - 'DownloadString'
+            - 'DownloadData'
+            - 'Invoke-WebRequest'
+            - 'Start-BitsTransfer'
+    selection_exec:
+        ScriptBlockText|contains:
+            - 'IEX'
+            - 'Invoke-Expression'
+    condition: selection_download and selection_exec
+falsepositives:
+    - Administrative scripts that install software from an internal repository
+level: high
