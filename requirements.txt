@@ -1,1 +1,3 @@
-
+# BlueShield itself uses only the Python standard library (3.10+).
+# This file holds the test dependencies.
+pytest>=8.0
